@@ -111,10 +111,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Runs a shell command via Shizuku and returns (exitCode, combinedOutput). */
+    /**
+     * Runs a shell command via Shizuku and returns (exitCode, combinedOutput).
+     *
+     * Shizuku.newProcess() is no longer a public method in current versions
+     * of dev.rikka.shizuku:api (Rikka is steering everyone towards
+     * UserService instead), but it's still there and still works — this is
+     * the standard reflection workaround documented by Shizuku's own
+     * maintainers/issue tracker for apps that just need simple shell exec.
+     */
     private fun runViaShizuku(cmd: String): Pair<Int, String> {
         return try {
-            val process = Shizuku.newProcess(arrayOf("sh", "-c", cmd), null, null)
+            val clazz = Class.forName("rikka.shizuku.Shizuku")
+            val method = clazz.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            )
+            method.isAccessible = true
+            val process = method.invoke(
+                null, arrayOf("sh", "-c", cmd), null, null
+            ) as rikka.shizuku.ShizukuRemoteProcess
+
             val out = process.inputStream.bufferedReader().readText()
             val err = process.errorStream.bufferedReader().readText()
             val code = process.waitFor()
