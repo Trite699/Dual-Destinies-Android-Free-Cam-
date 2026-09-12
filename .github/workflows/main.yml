@@ -1,0 +1,54 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # frida-inject is Frida's own official standalone injector binary —
+      # not something we build ourselves. Pin FRIDA_VERSION to whatever
+      # frida-inject release you've tested hook.js against.
+      - name: Fetch frida-inject (android-arm64)
+        env:
+          FRIDA_VERSION: "16.4.8"
+        run: |
+          set -euxo pipefail
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-inject-${FRIDA_VERSION}-android-arm64.xz"
+          curl -fL "$URL" -o frida-inject.xz
+          xz -d frida-inject.xz
+          mkdir -p app/src/main/assets
+          mv frida-inject app/src/main/assets/frida-inject
+          chmod 755 app/src/main/assets/frida-inject
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freecam-loader-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
