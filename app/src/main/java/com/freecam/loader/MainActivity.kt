@@ -11,23 +11,24 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import rikka.shizuku.Shizuku
-import java.io.File
-import java.io.FileOutputStream
 
 /**
- * Entry point. This app does NOT attach to another process by itself —
+ * Entry point. This app does NOT attach to another process by itself --
  * Android's sandbox forbids that without elevated privileges. What it does:
  *
  *  1. Confirms the Shizuku service is running and permission is granted.
- *  2. Copies the bundled `frida-inject` binary + hook.js out of assets
- *     into this app's private, executable storage dir.
- *  3. Runs `frida-inject -n <process> -s hook.js` via Shizuku — Frida's
+ *  2. Streams the bundled `frida-inject` binary + hook.js from this app's
+ *     assets straight into /data/local/tmp via a Shizuku-privileged
+ *     process (NOT via this app's own private storage -- Shizuku's shell
+ *     runs as a different UID and can't read app-private files, so they
+ *     have to land somewhere universally accessible instead).
+ *  3. Runs `frida-inject -n <process> -s hook.js` via Shizuku -- Frida's
  *     own standalone injector, no frida-server daemon needed.
  *  4. Starts the floating overlay (OverlayService) so you can drive the
  *     camera once hook.js reports it's attached.
  *
  * Shizuku itself must already be installed and running (either paired
- * over ADB on a non-rooted device, or started from root) — see README.md.
+ * over ADB on a non-rooted device, or started from root) -- see README.md.
  * You must supply your own legally-owned copy of the game; this project
  * contains no game files, only the loader/mod tooling.
  */
@@ -35,6 +36,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var logView: TextView
     private lateinit var processInput: EditText
+
+    companion object {
+        private const val REMOTE_INJECT_PATH = "/data/local/tmp/freecam_frida_inject"
+        private const val REMOTE_HOOK_PATH = "/data/local/tmp/freecam_hook.js"
+    }
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { _, grantResult ->
         log(
@@ -111,29 +117,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Runs a shell command via Shizuku and returns (exitCode, combinedOutput).
-     *
-     * Shizuku.newProcess() is no longer a public method in current versions
-     * of dev.rikka.shizuku:api (Rikka is steering everyone towards
-     * UserService instead), but it's still there and still works — this is
-     * the standard reflection workaround documented by Shizuku's own
-     * maintainers/issue tracker for apps that just need simple shell exec.
-     */
+    /** Obtains a Shizuku remote process via reflection (newProcess is non-public in current API). */
+    private fun newShizukuProcess(cmd: Array<String>): rikka.shizuku.ShizukuRemoteProcess {
+        val clazz = Class.forName("rikka.shizuku.Shizuku")
+        val method = clazz.getDeclaredMethod(
+            "newProcess",
+            Array<String>::class.java,
+            Array<String>::class.java,
+            String::class.java
+        )
+        method.isAccessible = true
+        return method.invoke(null, cmd, null, null) as rikka.shizuku.ShizukuRemoteProcess
+    }
+
+    /** Runs a shell command via Shizuku and returns (exitCode, combinedOutput). */
     private fun runViaShizuku(cmd: String): Pair<Int, String> {
         return try {
-            val clazz = Class.forName("rikka.shizuku.Shizuku")
-            val method = clazz.getDeclaredMethod(
-                "newProcess",
-                Array<String>::class.java,
-                Array<String>::class.java,
-                String::class.java
-            )
-            method.isAccessible = true
-            val process = method.invoke(
-                null, arrayOf("sh", "-c", cmd), null, null
-            ) as rikka.shizuku.ShizukuRemoteProcess
-
+            val process = newShizukuProcess(arrayOf("sh", "-c", cmd))
             val out = process.inputStream.bufferedReader().readText()
             val err = process.errorStream.bufferedReader().readText()
             val code = process.waitFor()
@@ -143,35 +143,40 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Copies an asset out to a private, executable directory. */
-    private fun extractAsset(name: String): File {
-        val outFile = File(filesDir, name)
-        assets.open(name).use { input ->
-            FileOutputStream(outFile).use { output -> input.copyTo(output) }
+    /**
+     * Streams an asset's raw bytes into a Shizuku-privileged `cat > remotePath`
+     * process's stdin, then chmods it executable. This deliberately never
+     * touches this app's own private storage -- Shizuku's shell (root or ADB
+     * shell UID) generally cannot read files inside another app's sandboxed
+     * /data/user/0/<pkg>/ directory, which is exactly what caused
+     * "inaccessible or not found" when we extracted there first.
+     */
+    private fun pushAssetToDevice(assetName: String, remotePath: String): Boolean {
+        return try {
+            val bytes = assets.open(assetName).use { it.readBytes() }
+            val process = newShizukuProcess(arrayOf("sh", "-c", "cat > $remotePath"))
+            process.outputStream.use { it.write(bytes) }
+            val code = process.waitFor()
+            if (code != 0) {
+                val err = process.errorStream.bufferedReader().readText()
+                log("Failed writing $remotePath (exit $code): $err")
+                return false
+            }
+            val (chmodCode, chmodOut) = runViaShizuku("chmod 755 $remotePath")
+            if (chmodCode != 0) {
+                log("chmod failed on $remotePath (exit $chmodCode): $chmodOut")
+                return false
+            }
+            true
+        } catch (e: Exception) {
+            log("Error pushing $assetName -> $remotePath: ${e.message}")
+            false
         }
-        outFile.setExecutable(true)
-        return outFile
     }
 
     private fun extractAndInject() {
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
             log("Shizuku permission not granted yet -- tap 'Check Root' first.")
-            return
-        }
-
-        log("Extracting frida-inject + hook.js from assets...")
-        val injectBin = try {
-            extractAsset("frida-inject")
-        } catch (e: Exception) {
-            log("Missing assets/frida-inject -- CI fetches this automatically " +
-                "(see .github/workflows/build.yml); local builds must run " +
-                "scripts/fetch-frida-inject.sh first. ${e.message}")
-            return
-        }
-        val hookScript = try {
-            extractAsset("hook.js")
-        } catch (e: Exception) {
-            log("Missing assets/hook.js: ${e.message}")
             return
         }
 
@@ -181,16 +186,28 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        log("Chmod + launching frida-inject against '$target' (it must already be running)...")
-        runViaShizuku("chmod 755 ${injectBin.absolutePath}")
-        // -n attaches by process name; attaching to an already-running instance
-        // avoids racing the game's own startup/anti-tamper checks.
-        val cmd = "${injectBin.absolutePath} -n \"$target\" -s ${hookScript.absolutePath}"
+        log("Pushing frida-inject + hook.js to $REMOTE_INJECT_PATH / $REMOTE_HOOK_PATH...")
         Thread {
+            val injectOk = pushAssetToDevice("frida-inject", REMOTE_INJECT_PATH)
+            if (!injectOk) {
+                log("Could not stage frida-inject -- see error above. " +
+                    "Check assets/frida-inject exists (CI fetches it automatically).")
+                return@Thread
+            }
+            val hookOk = pushAssetToDevice("hook.js", REMOTE_HOOK_PATH)
+            if (!hookOk) {
+                log("Could not stage hook.js -- see error above.")
+                return@Thread
+            }
+
+            log("Launching frida-inject against '$target' (it must already be running)...")
+            // -n attaches by process name; attaching to an already-running instance
+            // avoids racing the game's own startup/anti-tamper checks.
+            val cmd = "$REMOTE_INJECT_PATH -n \"$target\" -s $REMOTE_HOOK_PATH"
             val (code, out) = runViaShizuku(cmd)
             log("frida-inject exited ($code):\n$out")
         }.start()
-        log("Injection command dispatched -- watch the log above. " +
+        log("Injection dispatched -- watch the log above. " +
             "If it reports 'attached', tap 'Start Overlay' below.")
     }
 }
