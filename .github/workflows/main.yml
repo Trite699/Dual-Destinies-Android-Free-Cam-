@@ -28,21 +28,6 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      # frida-inject is Frida's own official standalone injector binary —
-      # not something we build ourselves. Pin FRIDA_VERSION to whatever
-      # frida-inject release you've tested hook.js against.
-      - name: Fetch frida-inject (android-arm64)
-        env:
-          FRIDA_VERSION: "16.4.8"
-        run: |
-          set -euxo pipefail
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-inject-${FRIDA_VERSION}-android-arm64.xz"
-          curl -fL "$URL" -o frida-inject.xz
-          xz -d frida-inject.xz
-          mkdir -p app/src/main/assets
-          mv frida-inject app/src/main/assets/frida-inject
-          chmod 755 app/src/main/assets/frida-inject
-
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
 
