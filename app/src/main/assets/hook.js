@@ -1,5 +1,5 @@
 /*
- * hook.js — runs inside the game process via frida-inject.
+ * hook.js — runs inside the game process via frida-gadget (see patcher/patch_apk.py).
  *
  * Design (v1, conservative):
  * Rather than constructing a brand-new uFreeCamera object (its exact
@@ -32,7 +32,7 @@ let applyWorldOffsetFn = null;
 const state = { dx: 0.0, dy: 0.0, dz: 0.0 };
 
 function log(msg) {
-    console.log(`[freecam] ${msg}`);
+    console.log(`[freecam] ${msg}`); // gadget forwards this to logcat (tag: frida)
 }
 
 function findLib() {
@@ -134,16 +134,34 @@ function startSocketServer() {
     }).catch((e) => log(`listen failed: ${e}`));
 }
 
+function waitForGameLib(onReady) {
+    // With frida-gadget the script runs while the game's own library is still being
+    // linked (the gadget is one of its dependencies), so poll until it is mapped.
+    let tries = 0;
+    (function poll() {
+        if (Process.findModuleByName(LIB)) {
+            // give the loader a moment to finish relocations/constructors
+            setTimeout(onReady, 500);
+            return;
+        }
+        if (++tries % 20 === 0) log(`still waiting for ${LIB}...`);
+        setTimeout(poll, 100);
+    })();
+}
+
 function main() {
-    try {
-        hookChangeCamera();
-        resolveApplyOffset();
-        startSocketServer();
-        setTimeout(tick, 16);
-        log("ready — waiting for a camera change event to capture a target");
-    } catch (e) {
-        log(`init failed: ${e}`);
-    }
+    // Socket server first, so the overlay can connect even before the camera is hooked.
+    startSocketServer();
+    waitForGameLib(() => {
+        try {
+            hookChangeCamera();
+            resolveApplyOffset();
+            setTimeout(tick, 16);
+            log("ready — waiting for a camera change event to capture a target");
+        } catch (e) {
+            log(`init failed: ${e}`);
+        }
+    });
 }
 
 main();
