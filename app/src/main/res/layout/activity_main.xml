@@ -12,23 +12,11 @@
         android:textSize="20sp"
         android:textStyle="bold" />
 
-    <EditText
-        android:id="@+id/processNameInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="target process / package name" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btnCheckRoot"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Check Root" />
 
         <Button
             android:id="@+id/btnOverlayPerm"
@@ -44,11 +32,11 @@
         android:orientation="horizontal">
 
         <Button
-            android:id="@+id/btnInject"
+            android:id="@+id/btnTestHook"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Inject" />
+            android:text="Test Hook" />
 
         <Button
             android:id="@+id/btnOverlayStart"
